@@ -7,9 +7,11 @@ import { InvitePanel } from './InvitePanel';
 import ParticipantList from './ParticipantList';
 import { useInterviewStore, StatusChangeNotification } from '../store/interview';
 import { ParticipantStatus, getRoomStatusConfig, formatDuration, formatTime } from '../types';
-import { getRoomById, updateRoomStatus, getRoomParticipants, heartbeat } from '../services/interviewRoomService';
+import { getRoomById, getRoomParticipants, heartbeat } from '../services/interviewRoomService';
 import { connect, disconnect, subscribeParticipants, subscribeRoomStatus, sendHeartbeat } from '../services/websocketService';
 import { getProblemById } from '../services/problemService';
+import { useRoomStatusActions } from '../hooks/useRoomStatusActions';
+import { checkStartReadiness } from '../utils/roomStatus';
 
 export const InterviewerRoomView: React.FC = () => {
   const { roomId } = useParams<{ roomId: string }>();
@@ -18,6 +20,7 @@ export const InterviewerRoomView: React.FC = () => {
     currentRoom,
     currentUser,
     currentProblem,
+    participants,
     setCurrentRoom,
     setParticipants,
     updateParticipant,
@@ -32,6 +35,10 @@ export const InterviewerRoomView: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [duration, setDuration] = useState<string>('');
   const [localStatusNotification, setLocalStatusNotification] = useState<StatusChangeNotification | null>(null);
+  const [isStartConfirmOpen, setIsStartConfirmOpen] = useState(false);
+  const [isResumeConfirmOpen, setIsResumeConfirmOpen] = useState(false);
+  const { pendingAction, startInterview, endInterview, resumeInterview } =
+    useRoomStatusActions(roomId || '');
   const httpHeartbeatRef = useRef<number | null>(null);
   const wsHeartbeatRef = useRef<number | null>(null);
   const unsubscribeParticipantsRef = useRef<(() => void) | null>(null);
@@ -176,6 +183,16 @@ export const InterviewerRoomView: React.FC = () => {
     };
   }, [statusChangeNotification, setStatusChangeNotification]);
 
+  // 状态被其他标签页或 WebSocket 推送改变时，关闭对应的确认弹窗
+  useEffect(() => {
+    if (currentRoom && currentRoom.status !== 'WAITING') {
+      setIsStartConfirmOpen(false);
+    }
+    if (currentRoom && currentRoom.status !== 'COMPLETED') {
+      setIsResumeConfirmOpen(false);
+    }
+  }, [currentRoom?.status]);
+
   const getStatusDurationLabel = () => {
     if (!currentRoom) return '';
     switch (currentRoom.status) {
@@ -194,24 +211,24 @@ export const InterviewerRoomView: React.FC = () => {
     }
   };
 
-  const handleStartInterview = async () => {
-    if (!currentRoom) return;
-    try {
-      const updatedRoom = await updateRoomStatus(currentRoom.id, 'ACTIVE');
-      setCurrentRoom(updatedRoom);
-    } catch (error) {
-      console.error('Failed to start interview:', error);
-    }
+  // 开始前确认：先检查题目与候选人是否就绪，未就绪保持等待并在弹窗中指出缺项
+  const handleOpenStartConfirm = () => {
+    setIsStartConfirmOpen(true);
   };
 
-  const handleEndInterview = async () => {
-    if (!currentRoom) return;
-    try {
-      const updatedRoom = await updateRoomStatus(currentRoom.id, 'COMPLETED');
-      setCurrentRoom(updatedRoom);
-    } catch (error) {
-      console.error('Failed to end interview:', error);
-    }
+  const handleConfirmStart = async () => {
+    const readiness = checkStartReadiness(currentRoom, participants);
+    if (!readiness.ready) return; // 弹窗内已展示缺项，保持等待
+    const ok = await startInterview();
+    if (ok) setIsStartConfirmOpen(false);
+  };
+
+  const handleConfirmEnd = () => endInterview();
+
+  // 结束后回看：误操作可恢复进行中，代码与执行记录保留（store 不清理）
+  const handleConfirmResume = async () => {
+    const ok = await resumeInterview();
+    if (ok) setIsResumeConfirmOpen(false);
   };
 
   const handleBack = () => {
@@ -261,7 +278,8 @@ export const InterviewerRoomView: React.FC = () => {
     );
   }
 
-  if (!currentProblem) {
+  // WAITING 状态下允许题目缺失：由“开始前确认”指出该缺项；开始后题目仍缺失才视为加载异常
+  if (!currentProblem && currentRoom.status !== 'WAITING') {
     return (
       <div style={{
         display: 'flex',
@@ -290,6 +308,8 @@ export const InterviewerRoomView: React.FC = () => {
   }
 
   const statusConfig = currentRoom ? getRoomStatusConfig(currentRoom.status) : null;
+  const startReadiness = currentRoom ? checkStartReadiness(currentRoom, participants) : null;
+  const isPending = pendingAction !== null;
 
   return (
     <>
@@ -517,74 +537,126 @@ export const InterviewerRoomView: React.FC = () => {
             </div>
             {currentRoom.status === 'WAITING' && (
               <button
-                onClick={handleStartInterview}
+                onClick={handleOpenStartConfirm}
+                disabled={isPending}
                 style={{
                   padding: '10px 24px',
                   background: 'linear-gradient(135deg, #4caf50, #45a049)',
                   color: '#fff',
                   border: 'none',
                   borderRadius: '8px',
-                  cursor: 'pointer',
+                  cursor: isPending ? 'not-allowed' : 'pointer',
                   fontSize: '14px',
                   fontWeight: 600,
                   boxShadow: '0 4px 12px rgba(76, 175, 80, 0.3)',
                   transition: 'all 0.2s',
+                  opacity: isPending ? 0.7 : 1,
                 }}
                 onMouseEnter={(e) => {
-                  e.currentTarget.style.transform = 'translateY(-1px)';
-                  e.currentTarget.style.boxShadow = '0 6px 16px rgba(76, 175, 80, 0.4)';
+                  if (!isPending) {
+                    e.currentTarget.style.transform = 'translateY(-1px)';
+                    e.currentTarget.style.boxShadow = '0 6px 16px rgba(76, 175, 80, 0.4)';
+                  }
                 }}
                 onMouseLeave={(e) => {
                   e.currentTarget.style.transform = 'translateY(0)';
                   e.currentTarget.style.boxShadow = '0 4px 12px rgba(76, 175, 80, 0.3)';
                 }}>
-                ▶ 开始面试
+                {pendingAction === 'ACTIVE' ? '开始中...' : '▶ 开始面试'}
               </button>
             )}
             {currentRoom.status === 'ACTIVE' && (
               <button
-                onClick={handleEndInterview}
+                onClick={handleConfirmEnd}
+                disabled={isPending}
                 style={{
                   padding: '10px 24px',
                   background: 'linear-gradient(135deg, #f44336, #e53935)',
                   color: '#fff',
                   border: 'none',
                   borderRadius: '8px',
-                  cursor: 'pointer',
+                  cursor: isPending ? 'not-allowed' : 'pointer',
                   fontSize: '14px',
                   fontWeight: 600,
                   boxShadow: '0 4px 12px rgba(244, 67, 54, 0.3)',
                   transition: 'all 0.2s',
+                  opacity: isPending ? 0.7 : 1,
                 }}
                 onMouseEnter={(e) => {
-                  e.currentTarget.style.transform = 'translateY(-1px)';
-                  e.currentTarget.style.boxShadow = '0 6px 16px rgba(244, 67, 54, 0.4)';
+                  if (!isPending) {
+                    e.currentTarget.style.transform = 'translateY(-1px)';
+                    e.currentTarget.style.boxShadow = '0 6px 16px rgba(244, 67, 54, 0.4)';
+                  }
                 }}
                 onMouseLeave={(e) => {
                   e.currentTarget.style.transform = 'translateY(0)';
                   e.currentTarget.style.boxShadow = '0 4px 12px rgba(244, 67, 54, 0.3)';
                 }}>
-                ⏹ 结束面试
+                {pendingAction === 'COMPLETED' ? '结束中...' : '⏹ 结束面试'}
               </button>
             )}
             {currentRoom.status === 'COMPLETED' && (
-              <div style={{
-                padding: '8px 16px',
-                background: 'rgba(33, 150, 243, 0.1)',
-                border: '1px solid rgba(33, 150, 243, 0.3)',
-                borderRadius: '6px',
-                fontSize: '13px',
-                color: '#2196f3',
-                fontWeight: 500,
-              }}>
-                面试已完成
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div style={{
+                  padding: '8px 16px',
+                  background: 'rgba(33, 150, 243, 0.1)',
+                  border: '1px solid rgba(33, 150, 243, 0.3)',
+                  borderRadius: '6px',
+                  fontSize: '13px',
+                  color: '#2196f3',
+                  fontWeight: 500,
+                  whiteSpace: 'nowrap',
+                }}>
+                  面试已结束
+                </div>
+                <button
+                  onClick={() => setIsResumeConfirmOpen(true)}
+                  disabled={isPending}
+                  title="误结束？可恢复为进行中，代码与面试记录将保留"
+                  style={{
+                    padding: '8px 16px',
+                    background: 'rgba(76, 175, 80, 0.12)',
+                    color: '#4caf50',
+                    border: '1px solid rgba(76, 175, 80, 0.4)',
+                    borderRadius: '6px',
+                    cursor: isPending ? 'not-allowed' : 'pointer',
+                    fontSize: '13px',
+                    fontWeight: 600,
+                    whiteSpace: 'nowrap',
+                    opacity: isPending ? 0.7 : 1,
+                  }}>
+                  {pendingAction === 'ACTIVE' ? '恢复中...' : '↩ 恢复进行中'}
+                </button>
               </div>
             )}
           </div>
         </div>
 
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-          <ProblemPanel problem={currentProblem} />
+          {currentProblem ? (
+            <ProblemPanel problem={currentProblem} />
+          ) : (
+            <div style={{
+              width: '380px',
+              padding: '24px',
+              background: '#1a1a1a',
+              borderRight: '1px solid #333',
+              color: '#888',
+              fontSize: '14px',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '12px',
+              textAlign: 'center',
+            }}>
+              <span style={{ fontSize: '32px' }}>📋</span>
+              <div>该房间尚未配置面试题目</div>
+              <div style={{ fontSize: '12px', color: '#666', lineHeight: 1.7 }}>
+                请在创建房间时选择题目，<br />题目就绪后才可开始面试
+              </div>
+            </div>
+          )}
           <CodeEditor
             disabled={currentRoom.status !== 'ACTIVE'}
           />
@@ -601,6 +673,143 @@ export const InterviewerRoomView: React.FC = () => {
         <ParticipantList roomId={currentRoom.id} />
       </div>
 
+      {isStartConfirmOpen && startReadiness && (
+        <div
+          onClick={() => !isPending && setIsStartConfirmOpen(false)}
+          style={{
+            position: 'fixed', inset: 0,
+            background: 'rgba(0, 0, 0, 0.6)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 10000,
+          }}>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: '#1e1e1e',
+              borderRadius: '10px',
+              width: '440px',
+              maxWidth: '90vw',
+              border: '1px solid #333',
+              boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
+              overflow: 'hidden',
+            }}>
+            <div style={{ padding: '20px 24px', borderBottom: '1px solid #333' }}>
+              <h3 style={{ margin: 0, color: '#fff', fontSize: '17px' }}>开始前确认</h3>
+            </div>
+            <div style={{ padding: '20px 24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <p style={{ margin: 0, color: '#aaa', fontSize: '13px' }}>
+                请确认面试已就绪，开始后候选人即可编写与提交代码。
+              </p>
+              <ReadyCheckItem
+                ok={startReadiness.problemReady}
+                okText="面试题目已配置"
+                failText="题目未配置，请先创建房间时选择题目"
+              />
+              <ReadyCheckItem
+                ok={startReadiness.candidateReady}
+                okText="候选人已进入房间"
+                failText="候选人尚未进入房间，请等待候选人加入"
+              />
+              {!startReadiness.ready && (
+                <div style={{
+                  padding: '10px 12px',
+                  background: 'rgba(255, 152, 0, 0.1)',
+                  border: '1px solid rgba(255, 152, 0, 0.35)',
+                  borderRadius: '6px',
+                  color: '#ff9800',
+                  fontSize: '12px',
+                  lineHeight: 1.7,
+                }}>
+                  尚未就绪：{startReadiness.missing.join('；')}，面试将保持等待状态。
+                </div>
+              )}
+            </div>
+            <div style={{ padding: '14px 24px', borderTop: '1px solid #333', display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+              <button
+                onClick={() => setIsStartConfirmOpen(false)}
+                disabled={isPending}
+                style={{
+                  padding: '8px 18px', borderRadius: '6px',
+                  border: '1px solid #555', background: 'transparent',
+                  color: '#ccc', cursor: 'pointer', fontSize: '13px',
+                }}>
+                再等等
+              </button>
+              <button
+                onClick={handleConfirmStart}
+                disabled={isPending || !startReadiness.ready}
+                style={{
+                  padding: '8px 18px', borderRadius: '6px',
+                  border: 'none', background: startReadiness.ready ? '#4caf50' : '#555',
+                  color: '#fff',
+                  cursor: (isPending || !startReadiness.ready) ? 'not-allowed' : 'pointer',
+                  fontSize: '13px', fontWeight: 600,
+                  opacity: (isPending || !startReadiness.ready) ? 0.7 : 1,
+                }}>
+                {pendingAction === 'ACTIVE' ? '开始中...' : '确认开始'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isResumeConfirmOpen && (
+        <div
+          onClick={() => !isPending && setIsResumeConfirmOpen(false)}
+          style={{
+            position: 'fixed', inset: 0,
+            background: 'rgba(0, 0, 0, 0.6)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 10000,
+          }}>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: '#1e1e1e',
+              borderRadius: '10px',
+              width: '440px',
+              maxWidth: '90vw',
+              border: '1px solid #333',
+              boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
+              overflow: 'hidden',
+            }}>
+            <div style={{ padding: '20px 24px', borderBottom: '1px solid #333' }}>
+              <h3 style={{ margin: 0, color: '#fff', fontSize: '17px' }}>恢复面试</h3>
+            </div>
+            <div style={{ padding: '20px 24px' }}>
+              <p style={{ margin: 0, color: '#aaa', fontSize: '13px', lineHeight: 1.8 }}>
+                检测到面试已结束。如为误操作，可恢复为进行中。
+                <br />
+                恢复后<strong style={{ color: '#4caf50' }}>已有代码与面试记录将完整保留</strong>，面试可继续进行。
+              </p>
+            </div>
+            <div style={{ padding: '14px 24px', borderTop: '1px solid #333', display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+              <button
+                onClick={() => setIsResumeConfirmOpen(false)}
+                disabled={isPending}
+                style={{
+                  padding: '8px 18px', borderRadius: '6px',
+                  border: '1px solid #555', background: 'transparent',
+                  color: '#ccc', cursor: 'pointer', fontSize: '13px',
+                }}>
+                保持结束
+              </button>
+              <button
+                onClick={handleConfirmResume}
+                disabled={isPending}
+                style={{
+                  padding: '8px 18px', borderRadius: '6px',
+                  border: 'none', background: '#4caf50',
+                  color: '#fff', cursor: isPending ? 'not-allowed' : 'pointer',
+                  fontSize: '13px', fontWeight: 600, opacity: isPending ? 0.7 : 1,
+                }}>
+                {pendingAction === 'ACTIVE' ? '恢复中...' : '确认恢复'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <CreateRoomModal
         isOpen={isCreateModalOpen}
         onClose={() => setIsCreateModalOpen(false)}
@@ -610,3 +819,20 @@ export const InterviewerRoomView: React.FC = () => {
     </>
   );
 };
+
+const ReadyCheckItem: React.FC<{ ok: boolean; okText: string; failText: string }> = ({ ok, okText, failText }) => (
+  <div style={{
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    padding: '10px 12px',
+    borderRadius: '6px',
+    background: ok ? 'rgba(76, 175, 80, 0.08)' : 'rgba(244, 67, 54, 0.08)',
+    border: `1px solid ${ok ? 'rgba(76, 175, 80, 0.3)' : 'rgba(244, 67, 54, 0.3)'}`,
+    fontSize: '13px',
+    color: ok ? '#4caf50' : '#f44336',
+  }}>
+    <span style={{ fontSize: '15px' }}>{ok ? '✓' : '✕'}</span>
+    <span>{ok ? okText : failText}</span>
+  </div>
+);

@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { getRoomParticipants, updateRoomStatus, getRoomById, heartbeat } from '../services/interviewRoomService';
+import { getRoomParticipants, getRoomById, heartbeat } from '../services/interviewRoomService';
 import { subscribeParticipants, sendHeartbeat, connect, disconnect } from '../services/websocketService';
 import { useInterviewStore } from '../store/interview';
 import { ParticipantStatus, getRoomStatusConfig, formatTime } from '../types';
+import { useRoomStatusActions } from '../hooks/useRoomStatusActions';
+import { checkStartReadiness } from '../utils/roomStatus';
 
 const formatTimeAgo = (dateString: string): string => {
   const now = new Date().getTime();
@@ -33,6 +35,7 @@ const ParticipantList: React.FC<ParticipantListProps> = ({ roomId }) => {
   const { currentUser, participants, setParticipants, currentRoom, setCurrentRoom, invitations } = useInterviewStore();
   const [copied, setCopied] = useState(false);
   const [joinedNotification, setJoinedNotification] = useState<JoinedNotification | null>(null);
+  const { pendingAction, requestStart, endInterview, resumeInterview } = useRoomStatusActions(roomId);
   const prevParticipantsRef = useRef<ParticipantStatus[]>([]);
   const notificationTimerRef = useRef<number | null>(null);
 
@@ -63,22 +66,22 @@ const ParticipantList: React.FC<ParticipantListProps> = ({ roomId }) => {
     }
   }, [roomId, currentUser]);
 
-  const handleStartInterview = async () => {
-    try {
-      const updatedRoom = await updateRoomStatus(roomId, 'ACTIVE');
-      setCurrentRoom(updatedRoom);
-    } catch (error) {
-      console.error('Failed to start interview:', error);
-    }
+  // 开始前先做就绪检查（题目 + 候选人在线），缺项时保持等待并提示
+  const handleStartInterview = () => {
+    if (!currentRoom || pendingAction) return;
+    const readiness = checkStartReadiness(currentRoom, participants);
+    if (!readiness.ready) return;
+    requestStart();
   };
 
-  const handleEndInterview = async () => {
-    try {
-      const updatedRoom = await updateRoomStatus(roomId, 'COMPLETED');
-      setCurrentRoom(updatedRoom);
-    } catch (error) {
-      console.error('Failed to end interview:', error);
-    }
+  const handleEndInterview = () => {
+    if (pendingAction) return;
+    endInterview();
+  };
+
+  const handleResumeInterview = () => {
+    if (pendingAction) return;
+    resumeInterview();
   };
 
   const handleCopyRoomCode = async () => {
@@ -394,28 +397,35 @@ const ParticipantList: React.FC<ParticipantListProps> = ({ roomId }) => {
 
             {isInterviewer && (
               <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
-                {currentRoom.status === 'WAITING' && (
-                  <button
-                    onClick={handleStartInterview}
-                    style={{
-                      flex: 1,
-                      padding: '10px 16px',
-                      fontSize: '14px',
-                      fontWeight: 500,
-                      backgroundColor: '#4caf50',
-                      color: '#fff',
-                      border: 'none',
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      transition: 'background-color 0.2s',
-                    }}
-                  >
-                    开始面试
-                  </button>
-                )}
+                {currentRoom.status === 'WAITING' && (() => {
+                  const readiness = checkStartReadiness(currentRoom, participants);
+                  return (
+                    <button
+                      onClick={handleStartInterview}
+                      disabled={!!pendingAction}
+                      title={readiness.ready ? '开始面试' : `暂不能开始：${readiness.missing.join('；')}`}
+                      style={{
+                        flex: 1,
+                        padding: '10px 16px',
+                        fontSize: '14px',
+                        fontWeight: 500,
+                        backgroundColor: readiness.ready ? '#4caf50' : '#555',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: pendingAction ? 'not-allowed' : 'pointer',
+                        opacity: pendingAction ? 0.7 : 1,
+                        transition: 'background-color 0.2s',
+                      }}
+                    >
+                      {pendingAction === 'ACTIVE' ? '开始中...' : readiness.ready ? '开始面试' : '等待就绪'}
+                    </button>
+                  );
+                })()}
                 {currentRoom.status === 'ACTIVE' && (
                   <button
                     onClick={handleEndInterview}
+                    disabled={!!pendingAction}
                     style={{
                       flex: 1,
                       padding: '10px 16px',
@@ -425,11 +435,34 @@ const ParticipantList: React.FC<ParticipantListProps> = ({ roomId }) => {
                       color: '#fff',
                       border: 'none',
                       borderRadius: '6px',
-                      cursor: 'pointer',
+                      cursor: pendingAction ? 'not-allowed' : 'pointer',
+                      opacity: pendingAction ? 0.7 : 1,
                       transition: 'background-color 0.2s',
                     }}
                   >
-                    结束面试
+                    {pendingAction === 'COMPLETED' ? '结束中...' : '结束面试'}
+                  </button>
+                )}
+                {currentRoom.status === 'COMPLETED' && (
+                  <button
+                    onClick={handleResumeInterview}
+                    disabled={!!pendingAction}
+                    title="恢复为进行中，代码与面试记录将保留"
+                    style={{
+                      flex: 1,
+                      padding: '10px 16px',
+                      fontSize: '14px',
+                      fontWeight: 500,
+                      backgroundColor: '#4caf50',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '6px',
+                      cursor: pendingAction ? 'not-allowed' : 'pointer',
+                      opacity: pendingAction ? 0.7 : 1,
+                      transition: 'background-color 0.2s',
+                    }}
+                  >
+                    {pendingAction === 'ACTIVE' ? '恢复中...' : '恢复进行中'}
                   </button>
                 )}
               </div>

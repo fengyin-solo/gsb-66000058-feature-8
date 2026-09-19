@@ -1,4 +1,5 @@
 import type { InterviewRoom, ParticipantStatus, CreateRoomRequest, CreateRoomResponse, JoinRoomResponse } from '../types';
+import { canTransition, getRejectedMessage } from '../utils/roomStatus';
 
 const STORAGE_KEY = 'code_interview_rooms';
 
@@ -121,9 +122,28 @@ export async function mockUpdateRoomStatus(roomId: string, status: string): Prom
     throw new Error('房间不存在');
   }
 
+  const currentRoom = rooms[index];
+
+  // 与后端一致的状态机校验：非法流转（含重复点击导致的倒退）一律拒绝
+  if (!canTransition(currentRoom.status, status)) {
+    const error = new Error(getRejectedMessage(currentRoom.status, status));
+    (error as Error & { status: number }).status = 409;
+    throw error;
+  }
+
+  // 幂等：目标状态与当前相同，直接返回当前房间
+  if (currentRoom.status === status) {
+    return { ...currentRoom };
+  }
+
+  const now = new Date().toISOString();
   const updatedRoom: InterviewRoom = {
-    ...rooms[index],
+    ...currentRoom,
     status: status as InterviewRoom['status'],
+    startedAt: status === 'ACTIVE' ? (currentRoom.startedAt || now) : currentRoom.startedAt,
+    endedAt: (status === 'COMPLETED' || status === 'CANCELLED')
+      ? (currentRoom.endedAt || now)
+      : status === 'ACTIVE' ? undefined : currentRoom.endedAt,
   };
 
   roomsCache = [...rooms];
@@ -160,9 +180,9 @@ export async function mockGetRoomParticipants(roomId: string): Promise<Participa
       userId: room.candidateId,
       userName: '候选人',
       userRole: 'CANDIDATE',
-      isOnline: false,
+      isOnline: true,
       lastHeartbeat: new Date().toISOString(),
-      joinedAt: room.createdAt,
+      joinedAt: room.startedAt || room.createdAt,
     });
   }
 
@@ -180,11 +200,10 @@ export async function mockJoinRoom(roomId: string, data: { candidateName: string
   const candidateId = 'candidate-' + Date.now();
   const now = new Date().toISOString();
 
+  // 候选人加入不改变房间状态：是否开始由面试官在就绪检查通过后决定
   const updatedRoom: InterviewRoom = {
     ...rooms[index],
-    candidateId: candidateId,
-    status: 'ACTIVE',
-    startedAt: now,
+    candidateId,
   };
 
   const participant: ParticipantStatus = {

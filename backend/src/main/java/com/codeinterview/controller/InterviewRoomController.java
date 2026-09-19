@@ -103,17 +103,94 @@ public class InterviewRoomController {
             return new ResponseEntity<>(HttpStatus.NOT_FOUND);
         }
 
+        if (!isValidStatus(status)) {
+            return new ResponseEntity("未知的房间状态：" + status, HttpStatus.BAD_REQUEST);
+        }
+
         InterviewRoom room = roomOpt.get();
+        String currentStatus = room.getStatus();
+
+        // 幂等：重复点击相同的开始/结束操作时直接返回当前房间，状态不倒退
+        if (currentStatus.equals(status)) {
+            return new ResponseEntity<>(room, HttpStatus.OK);
+        }
+
+        if (!isTransitionAllowed(currentStatus, status)) {
+            return new ResponseEntity(getRejectedMessage(currentStatus, status), HttpStatus.CONFLICT);
+        }
+
+        // WAITING -> ACTIVE 的开始前确认：题目已配置且候选人已在线，否则保持等待并指出缺项
+        if ("WAITING".equals(currentStatus) && "ACTIVE".equals(status)) {
+            List<String> missing = new java.util.ArrayList<>();
+            if (room.getProblemId() == null || room.getProblemId().trim().isEmpty()) {
+                missing.add("题目未配置");
+            }
+            boolean candidateOnline = participantStatusRepository.findByRoomId(roomId).stream()
+                    .anyMatch(p -> "CANDIDATE".equals(p.getUserRole()) && p.isOnline());
+            if (!candidateOnline) {
+                missing.add("候选人尚未进入房间");
+            }
+            if (!missing.isEmpty()) {
+                return new ResponseEntity("面试尚未就绪：" + String.join("、", missing), HttpStatus.CONFLICT);
+            }
+        }
+
         room.setStatus(status);
 
-        if ("ACTIVE".equals(status) && room.getStartedAt() == null) {
-            room.setStartedAt(LocalDateTime.now());
-        } else if (("COMPLETED".equals(status) || "CANCELLED".equals(status)) && room.getEndedAt() == null) {
-            room.setEndedAt(LocalDateTime.now());
+        if ("ACTIVE".equals(status)) {
+            if (room.getStartedAt() == null) {
+                room.setStartedAt(LocalDateTime.now());
+            }
+            // 从已结束恢复进行中：清除结束时间，面试计时继续，代码与记录均保留
+            room.setEndedAt(null);
+        } else if ("COMPLETED".equals(status) || "CANCELLED".equals(status)) {
+            if (room.getEndedAt() == null) {
+                room.setEndedAt(LocalDateTime.now());
+            }
         }
 
         InterviewRoom updatedRoom = interviewRoomRepository.save(room);
+
+        // 广播房间状态，候选人端及其他标签页可即时感知开始/结束/恢复
+        messagingTemplate.convertAndSend("/topic/room/" + roomId + "/status",
+                new WebSocketMessage<>("ROOM_STATUS", updatedRoom));
+
         return new ResponseEntity<>(updatedRoom, HttpStatus.OK);
+    }
+
+    private boolean isValidStatus(String status) {
+        return "WAITING".equals(status) || "ACTIVE".equals(status)
+                || "COMPLETED".equals(status) || "CANCELLED".equals(status);
+    }
+
+    /**
+     * 房间状态机：
+     * WAITING   -> ACTIVE / CANCELLED
+     * ACTIVE    -> COMPLETED
+     * COMPLETED -> ACTIVE（误结束后恢复）
+     * CANCELLED 为终态
+     */
+    private boolean isTransitionAllowed(String from, String to) {
+        if ("WAITING".equals(from)) {
+            return "ACTIVE".equals(to) || "CANCELLED".equals(to);
+        }
+        if ("ACTIVE".equals(from)) {
+            return "COMPLETED".equals(to);
+        }
+        if ("COMPLETED".equals(from)) {
+            return "ACTIVE".equals(to);
+        }
+        return false;
+    }
+
+    private String getRejectedMessage(String from, String to) {
+        if ("COMPLETED".equals(from) && "ACTIVE".equals(to)) {
+            return "面试已结束，无法重新开始，如需继续请使用恢复操作";
+        }
+        if ("WAITING".equals(from) && "COMPLETED".equals(to)) {
+            return "面试尚未开始，无法结束";
+        }
+        return "当前状态不允许该操作（" + from + " -> " + to + "）";
     }
 
     @GetMapping("/{roomId}/participants")
