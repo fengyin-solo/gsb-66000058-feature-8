@@ -1,8 +1,9 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { getRoomParticipants, updateRoomStatus, getRoomById, heartbeat } from '../services/interviewRoomService';
+import { getRoomParticipants, getRoomById, heartbeat } from '../services/interviewRoomService';
 import { subscribeParticipants, sendHeartbeat, connect, disconnect } from '../services/websocketService';
 import { useInterviewStore } from '../store/interview';
-import { ParticipantStatus, getRoomStatusConfig, formatTime } from '../types';
+import { ParticipantStatus, getRoomStatusConfig, formatTime, ROOM_MISSING_ITEM_LABELS } from '../types';
+import { useRoomStatusActions } from '../hooks/useRoomStatusActions';
 
 const formatTimeAgo = (dateString: string): string => {
   const now = new Date().getTime();
@@ -35,6 +36,13 @@ const ParticipantList: React.FC<ParticipantListProps> = ({ roomId }) => {
   const [joinedNotification, setJoinedNotification] = useState<JoinedNotification | null>(null);
   const prevParticipantsRef = useRef<ParticipantStatus[]>([]);
   const notificationTimerRef = useRef<number | null>(null);
+  const {
+    startInterview,
+    endInterview,
+    restoreInterview,
+    isUpdating: isStatusUpdating,
+    missingItems,
+  } = useRoomStatusActions();
 
   const fetchParticipants = useCallback(async () => {
     try {
@@ -64,21 +72,15 @@ const ParticipantList: React.FC<ParticipantListProps> = ({ roomId }) => {
   }, [roomId, currentUser]);
 
   const handleStartInterview = async () => {
-    try {
-      const updatedRoom = await updateRoomStatus(roomId, 'ACTIVE');
-      setCurrentRoom(updatedRoom);
-    } catch (error) {
-      console.error('Failed to start interview:', error);
-    }
+    await startInterview();
   };
 
   const handleEndInterview = async () => {
-    try {
-      const updatedRoom = await updateRoomStatus(roomId, 'COMPLETED');
-      setCurrentRoom(updatedRoom);
-    } catch (error) {
-      console.error('Failed to end interview:', error);
-    }
+    await endInterview();
+  };
+
+  const handleRestoreInterview = async () => {
+    await restoreInterview();
   };
 
   const handleCopyRoomCode = async () => {
@@ -393,44 +395,87 @@ const ParticipantList: React.FC<ParticipantListProps> = ({ roomId }) => {
             </div>
 
             {isInterviewer && (
-              <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
-                {currentRoom.status === 'WAITING' && (
-                  <button
-                    onClick={handleStartInterview}
-                    style={{
-                      flex: 1,
-                      padding: '10px 16px',
-                      fontSize: '14px',
-                      fontWeight: 500,
-                      backgroundColor: '#4caf50',
-                      color: '#fff',
-                      border: 'none',
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      transition: 'background-color 0.2s',
-                    }}
-                  >
-                    开始面试
-                  </button>
-                )}
-                {currentRoom.status === 'ACTIVE' && (
-                  <button
-                    onClick={handleEndInterview}
-                    style={{
-                      flex: 1,
-                      padding: '10px 16px',
-                      fontSize: '14px',
-                      fontWeight: 500,
-                      backgroundColor: '#f44336',
-                      color: '#fff',
-                      border: 'none',
-                      borderRadius: '6px',
-                      cursor: 'pointer',
-                      transition: 'background-color 0.2s',
-                    }}
-                  >
-                    结束面试
-                  </button>
+              <div style={{ marginBottom: '16px' }}>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  {currentRoom.status === 'WAITING' && (
+                    <button
+                      onClick={handleStartInterview}
+                      disabled={isStatusUpdating}
+                      style={{
+                        flex: 1,
+                        padding: '10px 16px',
+                        fontSize: '14px',
+                        fontWeight: 500,
+                        backgroundColor: '#4caf50',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: isStatusUpdating ? 'not-allowed' : 'pointer',
+                        transition: 'background-color 0.2s',
+                        opacity: isStatusUpdating ? 0.6 : 1,
+                      }}
+                    >
+                      {isStatusUpdating ? '处理中...' : '开始面试'}
+                    </button>
+                  )}
+                  {currentRoom.status === 'ACTIVE' && (
+                    <button
+                      onClick={handleEndInterview}
+                      disabled={isStatusUpdating}
+                      style={{
+                        flex: 1,
+                        padding: '10px 16px',
+                        fontSize: '14px',
+                        fontWeight: 500,
+                        backgroundColor: '#f44336',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: isStatusUpdating ? 'not-allowed' : 'pointer',
+                        transition: 'background-color 0.2s',
+                        opacity: isStatusUpdating ? 0.6 : 1,
+                      }}
+                    >
+                      {isStatusUpdating ? '处理中...' : '结束面试'}
+                    </button>
+                  )}
+                  {currentRoom.status === 'COMPLETED' && (
+                    <button
+                      onClick={handleRestoreInterview}
+                      disabled={isStatusUpdating}
+                      title="误操作结束时可恢复为进行中，代码与面试记录将保留"
+                      style={{
+                        flex: 1,
+                        padding: '10px 16px',
+                        fontSize: '14px',
+                        fontWeight: 500,
+                        backgroundColor: '#2196f3',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: isStatusUpdating ? 'not-allowed' : 'pointer',
+                        transition: 'background-color 0.2s',
+                        opacity: isStatusUpdating ? 0.6 : 1,
+                      }}
+                    >
+                      {isStatusUpdating ? '处理中...' : '↩ 恢复面试'}
+                    </button>
+                  )}
+                </div>
+                {missingItems.length > 0 && currentRoom.status === 'WAITING' && (
+                  <div style={{
+                    marginTop: '8px',
+                    padding: '8px 10px',
+                    background: 'rgba(255, 152, 0, 0.12)',
+                    border: '1px solid rgba(255, 152, 0, 0.35)',
+                    borderRadius: '6px',
+                    fontSize: '12px',
+                    color: '#ffb74d',
+                    lineHeight: 1.5,
+                  }}>
+                    ⚠️ 暂不能开始：
+                    {missingItems.map((item) => ROOM_MISSING_ITEM_LABELS[item]).join('；')}
+                  </div>
                 )}
               </div>
             )}

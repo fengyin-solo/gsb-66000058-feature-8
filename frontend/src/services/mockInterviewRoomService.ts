@@ -1,6 +1,21 @@
-import type { InterviewRoom, ParticipantStatus, CreateRoomRequest, CreateRoomResponse, JoinRoomResponse } from '../types';
+import type { InterviewRoom, ParticipantStatus, CreateRoomRequest, CreateRoomResponse, JoinRoomResponse, RoomMissingItem, RoomStatusErrorBody } from '../types';
 
 const STORAGE_KEY = 'code_interview_rooms';
+
+/** 与后端一致的状态流转规则 */
+const ALLOWED_TRANSITIONS: Record<InterviewRoom['status'], InterviewRoom['status'][]> = {
+  WAITING: ['ACTIVE', 'CANCELLED'],
+  ACTIVE: ['COMPLETED', 'CANCELLED'],
+  COMPLETED: ['ACTIVE'],
+  CANCELLED: [],
+};
+
+const createStatusError = (body: RoomStatusErrorBody): Error => {
+  const error: any = new Error(body.message || '状态流转失败');
+  error.status = 409;
+  error.body = body;
+  return error;
+};
 
 const mockRooms: InterviewRoom[] = [];
 
@@ -121,10 +136,58 @@ export async function mockUpdateRoomStatus(roomId: string, status: string): Prom
     throw new Error('房间不存在');
   }
 
+  const currentRoom = rooms[index];
+  const targetStatus = status as InterviewRoom['status'];
+
+  // 幂等：重复点击开始/结束不回退状态、不刷新时间戳
+  if (currentRoom.status === targetStatus) {
+    return { ...currentRoom };
+  }
+
+  if (!ALLOWED_TRANSITIONS[currentRoom.status].includes(targetStatus)) {
+    throw createStatusError({
+      error: 'ILLEGAL_TRANSITION',
+      message: `不允许从 ${currentRoom.status} 变更为 ${targetStatus}`,
+      status: currentRoom.status,
+    });
+  }
+
+  // 开始前确认：题目与候选人必须就绪，否则保持等待并指出缺项
+  if (currentRoom.status === 'WAITING' && targetStatus === 'ACTIVE') {
+    const missingItems: RoomMissingItem[] = [];
+    if (!currentRoom.problemId) {
+      missingItems.push('PROBLEM');
+    }
+    if (!currentRoom.candidateId) {
+      missingItems.push('CANDIDATE');
+    }
+    if (missingItems.length > 0) {
+      throw createStatusError({
+        error: 'ROOM_NOT_READY',
+        message: '开始前请确认题目与候选人已就绪',
+        missingItems,
+        status: currentRoom.status,
+      });
+    }
+  }
+
+  const now = new Date().toISOString();
   const updatedRoom: InterviewRoom = {
-    ...rooms[index],
-    status: status as InterviewRoom['status'],
+    ...currentRoom,
+    status: targetStatus,
   };
+
+  if (targetStatus === 'ACTIVE') {
+    // 首次开始或误结束后的恢复：保留原有开始时间与面试记录，清除结束标记
+    if (!updatedRoom.startedAt) {
+      updatedRoom.startedAt = now;
+    }
+    updatedRoom.endedAt = undefined;
+  } else if (targetStatus === 'COMPLETED' || targetStatus === 'CANCELLED') {
+    if (!updatedRoom.endedAt) {
+      updatedRoom.endedAt = now;
+    }
+  }
 
   roomsCache = [...rooms];
   roomsCache[index] = updatedRoom;
@@ -180,11 +243,10 @@ export async function mockJoinRoom(roomId: string, data: { candidateName: string
   const candidateId = 'candidate-' + Date.now();
   const now = new Date().toISOString();
 
+  // 与后端一致：加入只登记候选人，不直接改变房间状态，开始需面试官确认
   const updatedRoom: InterviewRoom = {
     ...rooms[index],
     candidateId: candidateId,
-    status: 'ACTIVE',
-    startedAt: now,
   };
 
   const participant: ParticipantStatus = {

@@ -6,10 +6,11 @@ import { CreateRoomModal } from './CreateRoomModal';
 import { InvitePanel } from './InvitePanel';
 import ParticipantList from './ParticipantList';
 import { useInterviewStore, StatusChangeNotification } from '../store/interview';
-import { ParticipantStatus, getRoomStatusConfig, formatDuration, formatTime } from '../types';
-import { getRoomById, updateRoomStatus, getRoomParticipants, heartbeat } from '../services/interviewRoomService';
+import { ParticipantStatus, getRoomStatusConfig, formatDuration, formatTime, ROOM_MISSING_ITEM_LABELS } from '../types';
+import { getRoomById, getRoomParticipants, heartbeat } from '../services/interviewRoomService';
 import { connect, disconnect, subscribeParticipants, subscribeRoomStatus, sendHeartbeat } from '../services/websocketService';
 import { getProblemById } from '../services/problemService';
+import { useRoomStatusActions } from '../hooks/useRoomStatusActions';
 
 export const InterviewerRoomView: React.FC = () => {
   const { roomId } = useParams<{ roomId: string }>();
@@ -32,6 +33,14 @@ export const InterviewerRoomView: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [duration, setDuration] = useState<string>('');
   const [localStatusNotification, setLocalStatusNotification] = useState<StatusChangeNotification | null>(null);
+  const {
+    startInterview,
+    endInterview,
+    restoreInterview,
+    isUpdating: isStatusUpdating,
+    missingItems,
+    dismissMissingItems,
+  } = useRoomStatusActions();
   const httpHeartbeatRef = useRef<number | null>(null);
   const wsHeartbeatRef = useRef<number | null>(null);
   const unsubscribeParticipantsRef = useRef<(() => void) | null>(null);
@@ -195,23 +204,15 @@ export const InterviewerRoomView: React.FC = () => {
   };
 
   const handleStartInterview = async () => {
-    if (!currentRoom) return;
-    try {
-      const updatedRoom = await updateRoomStatus(currentRoom.id, 'ACTIVE');
-      setCurrentRoom(updatedRoom);
-    } catch (error) {
-      console.error('Failed to start interview:', error);
-    }
+    await startInterview();
   };
 
   const handleEndInterview = async () => {
-    if (!currentRoom) return;
-    try {
-      const updatedRoom = await updateRoomStatus(currentRoom.id, 'COMPLETED');
-      setCurrentRoom(updatedRoom);
-    } catch (error) {
-      console.error('Failed to end interview:', error);
-    }
+    await endInterview();
+  };
+
+  const handleRestoreInterview = async () => {
+    await restoreInterview();
   };
 
   const handleBack = () => {
@@ -518,19 +519,22 @@ export const InterviewerRoomView: React.FC = () => {
             {currentRoom.status === 'WAITING' && (
               <button
                 onClick={handleStartInterview}
+                disabled={isStatusUpdating}
                 style={{
                   padding: '10px 24px',
                   background: 'linear-gradient(135deg, #4caf50, #45a049)',
                   color: '#fff',
                   border: 'none',
                   borderRadius: '8px',
-                  cursor: 'pointer',
+                  cursor: isStatusUpdating ? 'not-allowed' : 'pointer',
                   fontSize: '14px',
                   fontWeight: 600,
                   boxShadow: '0 4px 12px rgba(76, 175, 80, 0.3)',
                   transition: 'all 0.2s',
+                  opacity: isStatusUpdating ? 0.6 : 1,
                 }}
                 onMouseEnter={(e) => {
+                  if (isStatusUpdating) return;
                   e.currentTarget.style.transform = 'translateY(-1px)';
                   e.currentTarget.style.boxShadow = '0 6px 16px rgba(76, 175, 80, 0.4)';
                 }}
@@ -538,25 +542,28 @@ export const InterviewerRoomView: React.FC = () => {
                   e.currentTarget.style.transform = 'translateY(0)';
                   e.currentTarget.style.boxShadow = '0 4px 12px rgba(76, 175, 80, 0.3)';
                 }}>
-                ▶ 开始面试
+                {isStatusUpdating ? '处理中...' : '▶ 开始面试'}
               </button>
             )}
             {currentRoom.status === 'ACTIVE' && (
               <button
                 onClick={handleEndInterview}
+                disabled={isStatusUpdating}
                 style={{
                   padding: '10px 24px',
                   background: 'linear-gradient(135deg, #f44336, #e53935)',
                   color: '#fff',
                   border: 'none',
                   borderRadius: '8px',
-                  cursor: 'pointer',
+                  cursor: isStatusUpdating ? 'not-allowed' : 'pointer',
                   fontSize: '14px',
                   fontWeight: 600,
                   boxShadow: '0 4px 12px rgba(244, 67, 54, 0.3)',
                   transition: 'all 0.2s',
+                  opacity: isStatusUpdating ? 0.6 : 1,
                 }}
                 onMouseEnter={(e) => {
+                  if (isStatusUpdating) return;
                   e.currentTarget.style.transform = 'translateY(-1px)';
                   e.currentTarget.style.boxShadow = '0 6px 16px rgba(244, 67, 54, 0.4)';
                 }}
@@ -564,24 +571,87 @@ export const InterviewerRoomView: React.FC = () => {
                   e.currentTarget.style.transform = 'translateY(0)';
                   e.currentTarget.style.boxShadow = '0 4px 12px rgba(244, 67, 54, 0.3)';
                 }}>
-                ⏹ 结束面试
+                {isStatusUpdating ? '处理中...' : '⏹ 结束面试'}
               </button>
             )}
             {currentRoom.status === 'COMPLETED' && (
-              <div style={{
-                padding: '8px 16px',
-                background: 'rgba(33, 150, 243, 0.1)',
-                border: '1px solid rgba(33, 150, 243, 0.3)',
-                borderRadius: '6px',
-                fontSize: '13px',
-                color: '#2196f3',
-                fontWeight: 500,
-              }}>
-                面试已完成
-              </div>
+              <>
+                <div style={{
+                  padding: '8px 16px',
+                  background: 'rgba(33, 150, 243, 0.1)',
+                  border: '1px solid rgba(33, 150, 243, 0.3)',
+                  borderRadius: '6px',
+                  fontSize: '13px',
+                  color: '#2196f3',
+                  fontWeight: 500,
+                }}>
+                  面试已完成 · 可回看代码与记录
+                </div>
+                <button
+                  onClick={handleRestoreInterview}
+                  disabled={isStatusUpdating}
+                  title="误操作结束时可恢复为进行中，代码与面试记录将保留"
+                  style={{
+                    padding: '10px 24px',
+                    background: 'linear-gradient(135deg, #2196f3, #1e88e5)',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '8px',
+                    cursor: isStatusUpdating ? 'not-allowed' : 'pointer',
+                    fontSize: '14px',
+                    fontWeight: 600,
+                    boxShadow: '0 4px 12px rgba(33, 150, 243, 0.3)',
+                    transition: 'all 0.2s',
+                    opacity: isStatusUpdating ? 0.6 : 1,
+                  }}
+                  onMouseEnter={(e) => {
+                    if (isStatusUpdating) return;
+                    e.currentTarget.style.transform = 'translateY(-1px)';
+                    e.currentTarget.style.boxShadow = '0 6px 16px rgba(33, 150, 243, 0.4)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = 'translateY(0)';
+                    e.currentTarget.style.boxShadow = '0 4px 12px rgba(33, 150, 243, 0.3)';
+                  }}>
+                  {isStatusUpdating ? '处理中...' : '↩ 恢复面试'}
+                </button>
+              </>
             )}
           </div>
         </div>
+
+        {missingItems.length > 0 && currentRoom.status === 'WAITING' && (
+          <div style={{
+            background: 'rgba(255, 152, 0, 0.12)',
+            borderBottom: '1px solid rgba(255, 152, 0, 0.35)',
+            padding: '8px 20px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+          }}>
+            <span style={{ fontSize: '14px' }}>⚠️</span>
+            <span style={{ color: '#ffb74d', fontSize: '13px', flex: 1 }}>
+              暂不能开始面试，请先确认：
+              {missingItems.map((item) => ROOM_MISSING_ITEM_LABELS[item]).join('；')}
+            </span>
+            <button
+              onClick={dismissMissingItems}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: '#ffb74d',
+                fontSize: '16px',
+                cursor: 'pointer',
+                padding: '0 4px',
+                opacity: 0.8,
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.opacity = '1')}
+              onMouseLeave={(e) => (e.currentTarget.style.opacity = '0.8')}
+            >
+              ×
+            </button>
+          </div>
+        )}
 
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
           <ProblemPanel problem={currentProblem} />

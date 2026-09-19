@@ -22,7 +22,14 @@ export async function request<T>(url: string, options: RequestOptions = {}): Pro
   const response = await fetch(`${BASE_URL}${url}`, config);
 
   if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
+    const error: any = new Error(`HTTP error! status: ${response.status}`);
+    error.status = response.status;
+    try {
+      error.body = await response.json();
+    } catch {
+      error.body = null;
+    }
+    throw error;
   }
 
   const text = await response.text();

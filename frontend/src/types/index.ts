@@ -283,6 +283,22 @@ export const getRoomStatusConfig = (status: string): RoomStatusConfig => {
   return ROOM_STATUS_CONFIGS.find(s => s.value === status) || ROOM_STATUS_CONFIGS[0];
 };
 
+/** 面试开始前就绪检查的缺项 */
+export type RoomMissingItem = 'PROBLEM' | 'CANDIDATE';
+
+export const ROOM_MISSING_ITEM_LABELS: Record<RoomMissingItem, string> = {
+  PROBLEM: '题目未就绪（未设置或题目已删除）',
+  CANDIDATE: '候选人未入场',
+};
+
+/** 状态流转失败时后端返回的错误体 */
+export interface RoomStatusErrorBody {
+  error?: string;
+  message?: string;
+  missingItems?: RoomMissingItem[];
+  status?: string;
+}
+
 export const formatDuration = (startTime: string, endTime?: string): string => {
   const start = new Date(startTime).getTime();
   const end = endTime ? new Date(endTime).getTime() : Date.now();

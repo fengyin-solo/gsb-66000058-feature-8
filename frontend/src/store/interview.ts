@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Problem, Submission, InterviewRoom, User, CandidateInvitation, ParticipantStatus, getDefaultCodeByLanguage } from '../types';
+import { Problem, Submission, InterviewRoom, User, CandidateInvitation, ParticipantStatus, RoomMissingItem, getDefaultCodeByLanguage } from '../types';
 
 export interface ExecutionResult {
   success: boolean;
@@ -51,6 +51,8 @@ interface InterviewState {
   participants: ParticipantStatus[];
   isConnected: boolean;
   statusChangeNotification: StatusChangeNotification | null;
+  roomStatusUpdating: boolean;
+  roomMissingItems: RoomMissingItem[];
   setProblem: (p: Problem) => void;
   setCode: (code: string) => void;
   setLanguage: (lang: string) => void;
@@ -73,6 +75,8 @@ interface InterviewState {
   updateParticipant: (participant: ParticipantStatus) => void;
   setIsConnected: (connected: boolean) => void;
   setStatusChangeNotification: (notification: StatusChangeNotification | null) => void;
+  setRoomStatusUpdating: (updating: boolean) => void;
+  setRoomMissingItems: (items: RoomMissingItem[]) => void;
   resetRoom: () => void;
   setProblems: (problems: Problem[]) => void;
   addProblem: (problem: Problem) => void;
@@ -88,6 +92,7 @@ export const useInterviewStore = create<InterviewState>((set) => ({
   executionHistory: [],
   currentUser: null, myRooms: [], currentRoom: null, invitations: [], participants: [], isConnected: false,
   statusChangeNotification: null,
+  roomStatusUpdating: false, roomMissingItems: [],
   setProblem: (p) => set({ currentProblem: p }),
   setCode: (code) => set({ code }),
   setLanguage: (lang) => {
@@ -153,6 +158,8 @@ export const useInterviewStore = create<InterviewState>((set) => ({
   }),
   setIsConnected: (connected) => set({ isConnected: connected }),
   setStatusChangeNotification: (notification) => set({ statusChangeNotification: notification }),
+  setRoomStatusUpdating: (updating) => set({ roomStatusUpdating: updating }),
+  setRoomMissingItems: (items) => set({ roomMissingItems: items }),
   resetRoom: () => set({
     currentRoom: null, deprecatedRoom: null, room: null,
     currentProblem: null,
@@ -161,6 +168,8 @@ export const useInterviewStore = create<InterviewState>((set) => ({
     lastRunResult: null,
     lastSubmissionResult: null,
     statusChangeNotification: null,
+    roomStatusUpdating: false,
+    roomMissingItems: [],
   }),
   setProblems: (problems) => set({ problems }),
   addProblem: (problem) => set((state) => ({ problems: [problem, ...state.problems] })),
